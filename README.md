@@ -19,5 +19,5 @@ An automated Windows desktop companion for the official ChatGPT Desktop app that
    - `.\.venv\Scripts\pythonw.exe main.py`
 
 ## Credits & Acknowledgments
-- **Original Concept & Base UIA Architecture:** Full credit and thanks to the original creator of **GPT_KeepGoing** for the foundational Windows UI Automation reader/actor structure.
-- **24/7 Unattended Engine, S0 Power/Wake Orchestration, Post-Send Verification & Material 3 UI:** Built by Shino Shibu.
+- **Original Concept & Base UIA Architecture:** Full credit and special thanks to **[MoELuaNMaT](https://github.com/MoELuaNMaT)**, creator of **[GPT_KeepGoing](https://github.com/MoELuaNMaT/GPT_KeepGoing)**, for the foundational Windows UI Automation (`uiautomation`) reader/actor architecture.
+- **24/7 Unattended Engine, S0 Power/Wake Orchestration, Post-Send Verification & Material 3 UI:** Built and extended by Shino Shibu.
