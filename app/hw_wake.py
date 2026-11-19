@@ -1,3 +1,4 @@
+﻿import threading
 # -*- coding: utf-8 -*-
 """Hardware RTC Wake Timer, Verification Auditor & Idle-Aware Sleep Controller."""
 
@@ -241,15 +242,116 @@ def verify_wake_configuration() -> dict:
     return report
 
 
-def enter_sleep(log=None):
-    """Turns off displays in low-power standby without freezing the background wake timer."""
-    global _last_wake_mono
-    if log:
-        log.write("info", "hw_entering_sleep", idle_sec=int(get_os_idle_seconds()))
-    release_wake_lock()
+_POST_WAKE_GUARD_SEC = 900  # Do not re-hibernate for 15 mins after waking up
+
+def _is_on_ac_power():
+    """Returns True if plugged into AC power, False if running on battery."""
+    class SYSTEM_POWER_STATUS(ctypes.Structure):
+        _fields_ = [
+            ("ACLineStatus", ctypes.c_byte),
+            ("BatteryFlag", ctypes.c_byte),
+            ("BatteryLifePercent", ctypes.c_byte),
+            ("SystemStatusFlag", ctypes.c_byte),
+            ("BatteryLifeTime", ctypes.c_ulong),
+            ("BatteryFullLifeTime", ctypes.c_ulong),
+        ]
+    status = SYSTEM_POWER_STATUS()
+    if ctypes.windll.kernel32.GetSystemPowerStatus(ctypes.byref(status)):
+        return status.ACLineStatus == 1
+    return True
+
+def _nudge_wake():
+    """Simulates a 1px mouse nudge to wake the display, reset OS idle time, and cancel Windows' 2-min unattended sleep timeout."""
     try:
-        ctypes.windll.user32.PostMessageW(0xFFFF, 0x0112, 0xF170, 2)
+        ctypes.windll.user32.mouse_event(0x0001, 1, 0, 0, 0)
+        time.sleep(0.05)
+        ctypes.windll.user32.mouse_event(0x0001, -1, 0, 0, 0)
+        # Hold system-only wake lock (ES_CONTINUOUS | ES_SYSTEM_REQUIRED) without sticky display lock
+        ctypes.windll.kernel32.SetThreadExecutionState(0x80000001)
     except Exception:
         pass
-    _last_wake_mono = time.monotonic()
+
+def enter_sleep(log=None):
+    """AC: Display-Off standby. Battery: Hibernate (S4, 0% drain, RTC wake) with post-wake guard & display nudge."""
+    global _last_wake_mono
+    on_ac = _is_on_ac_power()
+
+    # Edge-case guard: if we just woke from Hibernate (<15 mins ago), stay awake for the upcoming quota reset
+    if not on_ac and _last_wake_mono and (time.monotonic() - _last_wake_mono) < _POST_WAKE_GUARD_SEC:
+        if log:
+            log.write("info", "hw_sleep_skipped_post_wake_guard", elapsed_sec=int(time.monotonic() - _last_wake_mono))
+        return
+
+    if log:
+        log.write("info", "hw_entering_sleep", idle_sec=int(get_os_idle_seconds()), mode="ac_display_off" if on_ac else "dc_hibernate")
+    release_wake_lock()
+    try:
+        if on_ac:
+            ctypes.windll.user32.PostMessageW(0xFFFF, 0x0112, 0xF170, 2)
+        else:
+            # Blocks until the motherboard RTC (or user) wakes the laptop from Hibernate
+            ctypes.windll.powrprof.SetSuspendState(1, 0, 0)
+            _last_wake_mono = time.monotonic()
+            _nudge_wake()
+            if log:
+                log.write("info", "hw_woke_from_hibernate", action="mouse_nudge_and_sys_lock")
+    except Exception:
+        pass
+    if on_ac:
+        _last_wake_mono = time.monotonic()
     time.sleep(1.0)
+
+def ensure_power_environment(log=None):
+    """Checks powercfg /a on startup; auto-enables Hibernate (S4), RTC wake timers, and no-lock-on-wake if needed."""
+    try:
+        res = subprocess.run(
+            ["powercfg", "/a"],
+            capture_output=True,
+            text=True,
+            creationflags=0x08000000,
+            timeout=10,
+        )
+        out = (res.stdout or "").lower()
+        avail_section = out.split("not available")[0] if "not available" in out else out
+        hibernate_ready = "hibernate" in avail_section
+
+        if hibernate_ready:
+            if log:
+                log.write("info", "hw_power_env_ready", hibernate=True)
+            return True
+
+        if "hibernation has not been enabled" not in out:
+            if log:
+                log.write("warn", "hw_hibernate_unsupported_by_firmware")
+            return False
+
+        cmds = [
+            "powercfg /hibernate on",
+            "powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP RTCWAKE 1",
+            "powercfg /setdcvalueindex SCHEME_CURRENT SUB_SLEEP RTCWAKE 1",
+            "powercfg /setacvalueindex SCHEME_CURRENT SUB_NONE CONSOLELOCK 0",
+            "powercfg /setdcvalueindex SCHEME_CURRENT SUB_NONE CONSOLELOCK 0",
+            "powercfg /change monitor-timeout-ac 2",
+            "powercfg /change standby-timeout-ac 0",
+            "powercfg /change monitor-timeout-dc 2",
+            "powercfg /change hibernate-timeout-dc 5",
+            "powercfg /setactive SCHEME_CURRENT",
+        ]
+
+        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+        if is_admin:
+            for c in cmds:
+                subprocess.run(c, shell=True, creationflags=0x08000000, timeout=10)
+        else:
+            joined = "; ".join(cmds)
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", "powershell.exe", f"-NoProfile -WindowStyle Hidden -Command \"{joined}\"", None, 0
+            )
+        if log:
+            log.write("info", "hw_power_env_provisioned", elevated=is_admin)
+        return True
+    except Exception:
+        return False
+
+# Run non-blocking check automatically when the app starts
+threading.Thread(target=ensure_power_environment, daemon=True).start()
