@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """DPI-Adaptive & Geometry-Aware UIA Reader for ChatGPT Desktop App."""
 
 import re
@@ -173,7 +173,12 @@ def read(win=None):
             from .discovery import find_hwnd
             hwnd_chk = find_hwnd()
             if hwnd_chk and ctypes.windll.user32.IsIconic(hwnd_chk):
-                ctypes.windll.user32.ShowWindow(hwnd_chk, 9)
+                from .hw_wake import get_os_idle_seconds
+                if get_os_idle_seconds() < 60:
+                    snap.error = "ChatGPT minimized (user active)"
+                    snap.read_ms = _pause_ms(t0)
+                    return snap
+                ctypes.windll.user32.ShowWindow(hwnd_chk, 4)  # SW_SHOWNOACTIVATE
                 time.sleep(0.25)
             win = find_window()
         if win is None:
